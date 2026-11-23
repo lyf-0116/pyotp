@@ -1,3 +1,10 @@
+Unreleased
+==========
+
+-  Implement HOTP.verify_and_get_counter, a stateful verification method
+   that maintains the consumed counter watermark, the hit offset, and the
+   resync target together, rejecting replayed OTPs
+
 Changes for v2.12.1 (2026-11-18)
 ================================
 

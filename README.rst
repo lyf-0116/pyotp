@@ -19,7 +19,8 @@ minimum, application implementers should follow this checklist:
 - Ensure transport confidentiality by using HTTPS
 - Ensure HOTP/TOTP secret confidentiality by storing secrets in a controlled access database
 - Deny replay attacks by persisting the last accepted OTP counter for each credential and rejecting reused counters.
-  For TOTP, use ``verify_and_get_timecode()`` as described in `Preventing replay attacks`_ below.
+  For HOTP, use ``verify_and_get_counter()``; for TOTP, use ``verify_and_get_timecode()`` as described in
+  `Preventing replay attacks`_ below.
 - Throttle (rate limit) brute-force attacks against your application's login functionality (see RFC 4226, section 7.3
   and NIST SP 800-63B, section 3.2.2)
 - When implementing a "greenfield" application, consider supporting
@@ -133,6 +134,13 @@ Counter-based OTPs
     # OTP verified with a counter
     hotp.verify('666948', 1401) # => True
     hotp.verify('666948', 1402) # => False
+
+    # Stateful verification consumes the matching counter and rejects replays
+    hotp.verify_and_get_counter('666948', 1401) # => 1401
+    hotp.consumed_counter # => 1401 (highest consumed counter)
+    hotp.last_hit_offset # => 0 (hit offset within the searched window)
+    hotp.resync_target # => 1402 (counter the next verification resumes from)
+    hotp.verify_and_get_counter('666948', 1401) # => raises OTPVerificationError
 
 Generating a Secret Key
 ~~~~~~~~~~~~~~~~~~~~~~~

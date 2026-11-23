@@ -189,6 +189,45 @@ class HOTPExampleValuesFromTheRFC(unittest.TestCase):
         self.assertFalse(hotp.verify("520489", 10))
         self.assertFalse(hotp.verify("５２０４８９", 10))
 
+    def test_verify_and_get_counter_state_machine(self):
+        hotp = pyotp.HOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+        self.assertEqual(hotp.consumed_counter, -1)
+        self.assertIsNone(hotp.last_hit_offset)
+        self.assertEqual(hotp.resync_target, 0)
+
+        self.assertEqual(hotp.verify_and_get_counter("287082", 1), 1)
+        self.assertEqual(hotp.consumed_counter, 1)
+        self.assertEqual(hotp.last_hit_offset, 0)
+        self.assertEqual(hotp.resync_target, 2)
+
+        # Replaying the consumed OTP is rejected, even at its own counter.
+        with self.assertRaises(pyotp.OTPVerificationError):
+            hotp.verify_and_get_counter("287082", 1)
+        with self.assertRaises(pyotp.OTPVerificationError):
+            hotp.verify_and_get_counter("287082")
+        # Older consumed counters stay rejected inside a look-ahead window.
+        with self.assertRaises(pyotp.OTPVerificationError):
+            hotp.verify_and_get_counter("755224", 0, valid_window=5)
+        # Failed verifications leave the state machine untouched.
+        self.assertEqual(hotp.consumed_counter, 1)
+        self.assertEqual(hotp.last_hit_offset, 0)
+        self.assertEqual(hotp.resync_target, 2)
+
+        # A look-ahead window resynchronizes to a client that ran ahead.
+        self.assertEqual(hotp.verify_and_get_counter("254676", 2, valid_window=3), 5)
+        self.assertEqual(hotp.consumed_counter, 5)
+        self.assertEqual(hotp.last_hit_offset, 3)
+        self.assertEqual(hotp.resync_target, 6)
+
+        # The next verification resumes from the resync target by default.
+        self.assertEqual(hotp.verify_and_get_counter("287922"), 6)
+        self.assertEqual(hotp.consumed_counter, 6)
+        self.assertEqual(hotp.last_hit_offset, 0)
+        self.assertEqual(hotp.resync_target, 7)
+
+        with self.assertRaises(ValueError):
+            hotp.verify_and_get_counter("162583", 7, valid_window=-1)
+
     def test_provisioning_uri(self):
         hotp = pyotp.HOTP("wrn3pqx5uqxqvnqrwrn3pqx5uqxqvnqr", name="mark@percival")
 
