@@ -63,6 +63,8 @@ def parse_uri(uri: str) -> OTP:
     if parsed_uri.scheme != "otpauth":
         raise ValueError("Not an otpauth URI")
 
+    otp_type = parsed_uri.netloc
+
     # Parse issuer/accountname info. The label uses a literal ":" as the
     # issuer:account separator; a percent-encoded "%3A" is a colon that is
     # part of the issuer or account name, not a separator. Split on the
@@ -106,12 +108,16 @@ def parse_uri(uri: str) -> OTP:
             digits = int(value)
             otp_data["digits"] = digits
         elif key == "period":
+            if otp_type == "hotp":
+                raise ValueError("period is only valid in TOTP provisioning URIs")
             otp_data["interval"] = int(value)
         elif key == "counter":
+            if otp_type == "totp":
+                raise ValueError("counter is only valid in HOTP provisioning URIs")
             otp_data["initial_count"] = int(value)
 
-    if encoder != "steam" and digits is not None and digits not in [6, 7, 8]:
-        raise ValueError("Digits may only be 6, 7, or 8")
+    if encoder != "steam" and digits is not None and not (OTP.min_digits <= digits <= OTP.max_digits):
+        raise ValueError(f"Digits may only be between {OTP.min_digits} and {OTP.max_digits}")
 
     if not secret:
         raise ValueError("No secret found in URI")
@@ -119,9 +125,9 @@ def parse_uri(uri: str) -> OTP:
     # Create objects
     if encoder == "steam":
         return contrib.Steam(secret, **otp_data)
-    if parsed_uri.netloc == "totp":
+    if otp_type == "totp":
         return TOTP(secret, **otp_data)
-    elif parsed_uri.netloc == "hotp":
+    elif otp_type == "hotp":
         return HOTP(secret, **otp_data)
 
     raise ValueError("Not a supported OTP type")

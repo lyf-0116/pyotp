@@ -872,6 +872,31 @@ class ParseUriTest(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "interval must be positive"):
                         pyotp.parse_uri(f"otpauth://totp/?{query}")
 
+    def test_digit_range_round_trip(self):
+        secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+        for otp_type in (pyotp.TOTP, pyotp.HOTP):
+            for digits in range(6, 11):
+                with self.subTest(otp_type=otp_type.__name__, digits=digits):
+                    otp = otp_type(secret, digits=digits)
+                    parsed = pyotp.parse_uri(otp.provisioning_uri())
+                    self.assertIsInstance(parsed, otp_type)
+                    self.assertEqual(parsed.digits, digits)
+                    self.assertEqual(len(parsed.generate_otp(0)), digits)
+                    self.assertEqual(parsed.provisioning_uri(), otp.provisioning_uri())
+
+        for digits in (5, 11):
+            for kind in ("totp", "hotp"):
+                with self.subTest(kind=kind, digits=digits):
+                    with self.assertRaisesRegex(ValueError, "Digits may only be between 6 and 10"):
+                        pyotp.parse_uri(f"otpauth://{kind}?secret={secret}&digits={digits}")
+
+    def test_cross_type_parameters_are_rejected(self):
+        secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+        with self.assertRaisesRegex(ValueError, "counter is only valid in HOTP"):
+            pyotp.parse_uri(f"otpauth://totp/Example?secret={secret}&counter=5")
+        with self.assertRaisesRegex(ValueError, "period is only valid in TOTP"):
+            pyotp.parse_uri(f"otpauth://hotp/Example?secret={secret}&period=60")
+
     def test_invalids(self):
         with self.assertRaises(ValueError) as cm:
             pyotp.parse_uri("http://hello.com")
@@ -887,7 +912,11 @@ class ParseUriTest(unittest.TestCase):
 
         with self.assertRaises(ValueError) as cm:
             pyotp.parse_uri("otpauth://totp?digits=-1")
-        self.assertEqual("Digits may only be 6, 7, or 8", str(cm.exception))
+        self.assertEqual("Digits may only be between 6 and 10", str(cm.exception))
+
+        with self.assertRaises(ValueError) as cm:
+            pyotp.parse_uri("otpauth://totp?digits=11")
+        self.assertEqual("Digits may only be between 6 and 10", str(cm.exception))
 
         with self.assertRaises(ValueError) as cm:
             pyotp.parse_uri("otpauth://totp/SomeIssuer:?issuer=AnotherIssuer")

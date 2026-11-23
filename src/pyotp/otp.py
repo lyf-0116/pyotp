@@ -15,6 +15,8 @@ class OTP:
     """
 
     min_secret_length_bits: ClassVar[int] = 112
+    min_digits: ClassVar[int] = 6
+    max_digits: ClassVar[int] = 10
 
     def __init__(
         self,
@@ -26,8 +28,8 @@ class OTP:
         issuer: str | None = None,
     ) -> None:
         self.digits = digits
-        if not 6 <= digits <= 10:
-            raise ValueError("digits must be between 6 and 10")
+        if not self.min_digits <= digits <= self.max_digits:
+            raise ValueError(f"digits must be between {self.min_digits} and {self.max_digits}")
         self.digest = digest
         if digest in [hashlib.md5, hashlib.shake_128]:
             raise ValueError("selected digest function must generate digest size greater than or equals to 18 bytes")
