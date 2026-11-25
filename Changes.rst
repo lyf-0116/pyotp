@@ -1,3 +1,11 @@
+Unreleased
+==========
+
+-  Add opt-in TOTP replay protection through injectable
+   ``ReplayStore`` and ``TOTPSerializer`` interfaces. Successful
+   verification consumes the matching timecode, so the same timecode
+   cannot be accepted twice.
+
 Changes for v2.12.1 (2026-11-18)
 ================================
 

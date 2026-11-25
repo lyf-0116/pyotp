@@ -19,7 +19,8 @@ minimum, application implementers should follow this checklist:
 - Ensure transport confidentiality by using HTTPS
 - Ensure HOTP/TOTP secret confidentiality by storing secrets in a controlled access database
 - Deny replay attacks by persisting the last accepted OTP counter for each credential and rejecting reused counters.
-  For TOTP, use ``verify_and_get_timecode()`` as described in `Preventing replay attacks`_ below.
+  For TOTP, inject a ``ReplayStore`` or use ``verify_and_get_timecode()`` as described in
+  `Preventing replay attacks`_ below.
 - Throttle (rate limit) brute-force attacks against your application's login functionality (see RFC 4226, section 7.3
   and NIST SP 800-63B, section 3.2.2)
 - When implementing a "greenfield" application, consider supporting
@@ -77,11 +78,39 @@ Time-based OTPs
 Preventing replay attacks
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``TOTP.verify()`` and ``TOTP.verify_and_get_timecode()`` are stateless: they can accept the same OTP repeatedly while
-it remains valid. To prevent reuse, call ``verify_and_get_timecode()`` and persist its returned timecode for each
-credential in a database shared by all application workers. The timecode identifies the matching TOTP interval;
-it is not the wall-clock timestamp when verification occurred. Reject a timecode that is less than or equal to the
-last accepted timecode.
+By default, ``TOTP.verify()`` and ``TOTP.verify_and_get_timecode()`` are stateless: they can accept the same OTP
+repeatedly while it remains valid. To enforce single use, pass a credential-scoped store when constructing the
+``TOTP`` object:
+
+.. code:: python
+
+    import pyotp
+
+    store = pyotp.InMemoryReplayStore()
+    totp = pyotp.TOTP(secret, replay_store=store)
+
+    totp.verify(code)  # => True, and the matching timecode is consumed
+    totp.verify(code)  # => False, the timecode has already been used
+
+The matching timecode is recorded after a successful verification. Failed verifications do not consume anything.
+When ``valid_window`` is enabled, the timecode that actually matched is consumed, not the server's current timecode.
+``verify_and_get_timecode()`` raises ``pyotp.OTPVerificationError`` when the OTP does not match or its timecode was
+already consumed.
+
+``InMemoryReplayStore`` only works within one process. In a multi-instance deployment, subclass ``pyotp.ReplayStore``
+with a database-backed implementation. Its ``consume(timecode)`` method must atomically record the timecode and return
+``True`` only if it had not been consumed before. Use one store instance (or one credential-scoped adapter over the
+shared database) per account.
+
+For existing persistence layers, the ``serializer`` constructor argument is also supported. It accepts a
+``pyotp.TOTPSerializer`` with ``get_last_used_totp_timestamp()`` and ``save_last_used_totp_timestamp()`` methods.
+This interface stores a single high-water mark, so the read/compare/write sequence must be atomic in shared
+deployments.
+
+Alternatively, call ``verify_and_get_timecode()`` and persist its returned timecode yourself for each credential in a
+database shared by all application workers. The timecode identifies the matching TOTP interval; it is not the
+wall-clock timestamp when verification occurred. Reject a timecode that is less than or equal to the last accepted
+timecode.
 
 ``verify_and_get_timecode()`` raises ``pyotp.OTPVerificationError`` (a subclass of ``pyotp.PyOTPError``) if the OTP
 does not match within the allowed window. Successful verification always returns an integer timecode.

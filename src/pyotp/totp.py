@@ -9,6 +9,7 @@ from typing import Any
 from . import utils
 from .exceptions import OTPVerificationError
 from .otp import OTP
+from .replay import ReplayStore, TOTPSerializer, _SerializerReplayStore
 
 _TIMESTAMP_LIMIT = 253402300800  # 10000-01-01 00:00:00 UTC, exclusive.
 
@@ -27,6 +28,9 @@ class TOTP(OTP):
         name: str | None = None,
         issuer: str | None = None,
         interval: int = 30,
+        replay_store: ReplayStore | None = None,
+        serializer: TOTPSerializer | None = None,
+        store: ReplayStore | None = None,
     ) -> None:
         """
         :param s: secret in base32 format
@@ -35,6 +39,9 @@ class TOTP(OTP):
         :param name: account name
         :param issuer: issuer
         :param interval: the time interval in seconds, greater than 0 and at most 120. Defaults to 30.
+        :param replay_store: optional credential-scoped store used to consume matching timecodes
+        :param serializer: optional persistence interface for the last accepted timecode
+        :param store: alias for ``replay_store``
 
         See `NIST SP 800-63B-4 section 3.1.4.1
         <https://pages.nist.gov/800-63-4/sp800-63b.html>`_.
@@ -48,6 +55,16 @@ class TOTP(OTP):
         if not 0 < interval <= 120:
             raise ValueError("interval must be positive and at most 120 seconds")
         self.interval = interval
+        if store is not None:
+            if replay_store is not None:
+                raise TypeError("specify only one of replay_store and store")
+            replay_store = store
+        if replay_store is not None and serializer is not None:
+            raise TypeError("specify only one of replay_store and serializer")
+        if replay_store is None and serializer is not None:
+            replay_store = _SerializerReplayStore(serializer)
+        self.replay_store = replay_store
+        self.serializer = serializer
         super().__init__(s=s, digits=digits, digest=digest, name=name, issuer=issuer)
 
     def at(self, for_time: int | float | datetime.datetime, *, counter_offset: int = 0) -> str:
@@ -82,7 +99,13 @@ class TOTP(OTP):
         return self.generate_otp(self.timecode(time.time()))
 
     def verify(
-        self, otp: str, *, for_time: int | float | datetime.datetime | None = None, valid_window: int = 0
+        self,
+        otp: str,
+        *,
+        for_time: int | float | datetime.datetime | None = None,
+        valid_window: int = 0,
+        replay_store: ReplayStore | None = None,
+        store: ReplayStore | None = None,
     ) -> bool:
         """
         Verifies the OTP passed in against the current time OTP.
@@ -94,24 +117,25 @@ class TOTP(OTP):
         :param otp: the OTP to check against
         :param for_time: Unix timestamp (int or float) or datetime to check OTP at (defaults to now)
         :param valid_window: extends the validity to this many counter ticks before and after the current one
+        :param replay_store: optional credential-scoped store used to consume the matching timecode
+        :param store: alias for ``replay_store``
         :returns: True if verification succeeded, False otherwise
         :raises ValueError: if for_time is before the Unix epoch or after year 9999 in UTC
         """
         if for_time is None:
             for_time = time.time()
 
-        timecode = self.timecode(for_time)
-
-        if valid_window:
-            for i in range(-valid_window, valid_window + 1):
-                if utils.strings_equal(str(otp), str(self.generate_otp(timecode + i))):
-                    return True
-            return False
-
-        return utils.strings_equal(str(otp), str(self.generate_otp(timecode)))
+        resolved_store = self._resolve_replay_store(replay_store, store)
+        return self._verify_timecode(otp, for_time, valid_window, resolved_store) is not None
 
     def verify_and_get_timecode(
-        self, otp: str, *, for_time: int | float | datetime.datetime | None = None, valid_window: int = 0
+        self,
+        otp: str,
+        *,
+        for_time: int | float | datetime.datetime | None = None,
+        valid_window: int = 0,
+        replay_store: ReplayStore | None = None,
+        store: ReplayStore | None = None,
     ) -> int:
         """
         Verifies the OTP passed in against the current time OTP and returns the matching timecode.
@@ -134,6 +158,8 @@ class TOTP(OTP):
         :param otp: the OTP to check against
         :param for_time: Unix timestamp (int or float) or datetime to check OTP at (defaults to now)
         :param valid_window: extends the validity to this counter ticks before and after the current one
+        :param replay_store: optional credential-scoped store used to consume the matching timecode
+        :param store: alias for ``replay_store``
         :returns: matching timecode if verification succeeded
         :raises pyotp.exceptions.OTPVerificationError: if the OTP does not match within the valid window
         :raises ValueError: if valid_window is negative or for_time is before the Unix epoch or after year 9999 in UTC
@@ -144,11 +170,33 @@ class TOTP(OTP):
         if valid_window < 0:
             raise ValueError("valid_window cannot be negative")
 
-        timecode = self.timecode(for_time)
-        for i in range(-valid_window, valid_window + 1):
-            if utils.strings_equal(str(otp), str(self.generate_otp(timecode + i))):
-                return timecode + i
+        resolved_store = self._resolve_replay_store(replay_store, store)
+        matched_timecode = self._verify_timecode(otp, for_time, valid_window, resolved_store)
+        if matched_timecode is not None:
+            return matched_timecode
         raise OTPVerificationError("OTP verification failed")
+
+    def _resolve_replay_store(self, replay_store: ReplayStore | None, store: ReplayStore | None) -> ReplayStore | None:
+        if replay_store is not None and store is not None:
+            raise TypeError("specify only one of replay_store and store")
+        resolved_store = replay_store if replay_store is not None else store
+        return self.replay_store if resolved_store is None else resolved_store
+
+    def _verify_timecode(
+        self,
+        otp: str,
+        for_time: int | float | datetime.datetime,
+        valid_window: int,
+        replay_store: ReplayStore | None,
+    ) -> int | None:
+        timecode = self.timecode(for_time)
+        offsets = range(-valid_window, valid_window + 1) if valid_window else (0,)
+        for offset in offsets:
+            candidate_timecode = timecode + offset
+            if utils.strings_equal(str(otp), str(self.generate_otp(candidate_timecode))):
+                if replay_store is None or replay_store.consume(candidate_timecode):
+                    return candidate_timecode
+        return None
 
     def provisioning_uri(self, *, name: str | None = None, issuer_name: str | None = None, **kwargs: Any) -> str:
         """

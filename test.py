@@ -421,6 +421,98 @@ class TOTPExampleValuesFromTheRFC(unittest.TestCase):
             pyotp.random_hex(length=39)
 
 
+class TOTPReplayProtectionTest(unittest.TestCase):
+    SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+
+    def test_replay_store_rejects_reused_timecode(self):
+        store = pyotp.InMemoryReplayStore()
+        totp = pyotp.TOTP(self.SECRET, replay_store=store)
+        code = totp.at(200)
+
+        self.assertTrue(totp.verify(code, for_time=200))
+        self.assertEqual(store.last_consumed_timecode, 6)
+        self.assertFalse(totp.verify(code, for_time=200))
+        with self.assertRaises(pyotp.OTPVerificationError):
+            totp.verify_and_get_timecode(code, for_time=200)
+
+    def test_failed_verification_does_not_consume_timecode(self):
+        store = pyotp.InMemoryReplayStore()
+        totp = pyotp.TOTP(self.SECRET, replay_store=store)
+
+        self.assertFalse(totp.verify("000000", for_time=200))
+        self.assertIsNone(store.last_consumed_timecode)
+        self.assertTrue(totp.verify(totp.at(200), for_time=200))
+
+    def test_matched_window_timecode_is_consumed(self):
+        store = pyotp.InMemoryReplayStore()
+        totp = pyotp.TOTP(self.SECRET, replay_store=store)
+        next_code = totp.at(230)
+        current_code = totp.at(200)
+
+        self.assertTrue(totp.verify(next_code, for_time=200, valid_window=1))
+        self.assertEqual(store.last_consumed_timecode, 7)
+        self.assertTrue(store.is_consumed(7))
+        self.assertFalse(store.is_consumed(6))
+        self.assertFalse(totp.verify(next_code, for_time=200, valid_window=1))
+        self.assertTrue(totp.verify(current_code, for_time=200, valid_window=1))
+        self.assertFalse(totp.verify(current_code, for_time=200, valid_window=1))
+
+    def test_replay_store_can_be_shared_between_instances(self):
+        store = pyotp.InMemoryReplayStore()
+        first = pyotp.TOTP(self.SECRET, replay_store=store)
+        second = pyotp.TOTP(self.SECRET, replay_store=store)
+        code = first.at(200)
+
+        self.assertTrue(first.verify(code, for_time=200))
+        self.assertFalse(second.verify(code, for_time=200))
+
+    def test_custom_replay_store_interface(self):
+        class Store(pyotp.ReplayStore):
+            def __init__(self):
+                self.timecodes = set()
+
+            def consume(self, timecode):
+                if timecode in self.timecodes:
+                    return False
+                self.timecodes.add(timecode)
+                return True
+
+        store = Store()
+        totp = pyotp.TOTP(self.SECRET)
+        code = totp.at(200)
+
+        self.assertTrue(totp.verify(code, for_time=200, replay_store=store))
+        self.assertEqual(store.timecodes, {6})
+        self.assertFalse(totp.verify(code, for_time=200, replay_store=store))
+
+    def test_serializer_interface(self):
+        class Serializer(pyotp.TOTPSerializer):
+            def __init__(self):
+                self.last_timecode = None
+
+            def get_last_used_totp_timestamp(self):
+                return self.last_timecode
+
+            def save_last_used_totp_timestamp(self, timestamp):
+                self.last_timecode = timestamp
+
+        serializer = Serializer()
+        totp = pyotp.TOTP(self.SECRET, serializer=serializer)
+        code = totp.at(200)
+
+        self.assertTrue(totp.verify(code, for_time=200))
+        self.assertEqual(serializer.last_timecode, 6)
+        self.assertFalse(totp.verify(code, for_time=200))
+
+    def test_steam_inherits_replay_protection(self):
+        store = pyotp.InMemoryReplayStore()
+        steam = pyotp.contrib.Steam(self.SECRET, replay_store=store)
+        code = steam.at(200)
+
+        self.assertTrue(steam.verify(code, for_time=200))
+        self.assertFalse(steam.verify(code, for_time=200))
+
+
 @unittest.skipUnless(hasattr(time, "tzset"), "Local timezone tests require time.tzset()")
 class TOTPTimezones(unittest.TestCase):
     def setUp(self):

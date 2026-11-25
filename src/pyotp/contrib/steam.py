@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 
+from ..replay import ReplayStore, TOTPSerializer
 from ..totp import TOTP
 
 STEAM_CHARS = "23456789BCDFGHJKMNPQRTVWXY"  # steam's custom alphabet
@@ -14,7 +15,16 @@ class Steam(TOTP):
     """
 
     def __init__(
-        self, s: str, *, name: str | None = None, issuer: str | None = None, interval: int = 30, digits: int = 5
+        self,
+        s: str,
+        *,
+        name: str | None = None,
+        issuer: str | None = None,
+        interval: int = 30,
+        digits: int = 5,
+        replay_store: ReplayStore | None = None,
+        serializer: TOTPSerializer | None = None,
+        store: ReplayStore | None = None,
     ) -> None:
         """
         :param s: secret in base32 format
@@ -29,7 +39,16 @@ class Steam(TOTP):
         if not 0 < interval <= 120:
             raise ValueError("interval must be positive and at most 120 seconds")
         self.interval = interval
-        super().__init__(s=s, digits=10, digest=hashlib.sha1, name=name, issuer=issuer)
+        super().__init__(
+            s=s,
+            digits=10,
+            digest=hashlib.sha1,
+            name=name,
+            issuer=issuer,
+            replay_store=replay_store,
+            serializer=serializer,
+            store=store,
+        )
 
     def generate_otp(self, input: int) -> str:
         """
