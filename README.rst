@@ -18,8 +18,9 @@ minimum, application implementers should follow this checklist:
 
 - Ensure transport confidentiality by using HTTPS
 - Ensure HOTP/TOTP secret confidentiality by storing secrets in a controlled access database
-- Deny replay attacks by persisting the last accepted OTP counter for each credential and rejecting reused counters.
-  For TOTP, use ``verify_and_get_timecode()`` as described in `Preventing replay attacks`_ below.
+- Deny replay attacks by rejecting reused OTP counters. TOTP verification consumes the matching timecode
+  automatically, as described in `Preventing replay attacks`_ below; make sure every application worker shares
+  the same ``replay_store`` backend.
 - Throttle (rate limit) brute-force attacks against your application's login functionality (see RFC 4226, section 7.3
   and NIST SP 800-63B, section 3.2.2)
 - When implementing a "greenfield" application, consider supporting
@@ -77,40 +78,23 @@ Time-based OTPs
 Preventing replay attacks
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``TOTP.verify()`` and ``TOTP.verify_and_get_timecode()`` are stateless: they can accept the same OTP repeatedly while
-it remains valid. To prevent reuse, call ``verify_and_get_timecode()`` and persist its returned timecode for each
-credential in a database shared by all application workers. The timecode identifies the matching TOTP interval;
-it is not the wall-clock timestamp when verification occurred. Reject a timecode that is less than or equal to the
-last accepted timecode.
+``TOTP.verify()`` and ``TOTP.verify_and_get_timecode()`` consume the matching timecode on success: the same OTP
+cannot be verified again for the same account. The library tracks consumed timecodes per account in a
+``replay_store``. By default every ``TOTP`` instance shares a process-wide in-memory store, so protection works
+out of the box within a single process, even if a new ``TOTP`` object is created per request.
+
+This means verification is no longer stateless. Deployments spanning multiple processes or hosts must inject a
+shared backend into the ``replay_store`` constructor argument, or an attacker could replay an OTP against a
+different worker. Implement the ``pyotp.UsedTimecodeStore`` protocol — a single atomic ``consume(key, timecode)``
+operation that returns ``False`` if the timecode was already recorded — on top of, for example, Redis or a SQL
+database. The check and insert must be atomic, so two concurrent requests cannot both accept the same timecode.
+``pyotp.InMemoryUsedTimecodeStore`` is the thread-safe, process-local default.
 
 ``verify_and_get_timecode()`` raises ``pyotp.OTPVerificationError`` (a subclass of ``pyotp.PyOTPError``) if the OTP
-does not match within the allowed window. Successful verification always returns an integer timecode.
-
-The check and update must be atomic, so two concurrent requests cannot both accept the same timecode. For example,
-the following function uses a ``sqlite3.Connection`` named ``db`` and a ``totp_credentials`` table with one existing
-row per credential, an ``id`` primary key, and a nullable integer ``last_timecode`` column. Initialize
-``last_timecode`` to ``NULL`` for a new credential. ``totp`` and ``credential_id`` must refer to the same credential.
-
-.. code:: python
-
-    import pyotp
-
-    def verify_totp_once(db, credential_id, totp, otp):
-        try:
-            matched_timecode = totp.verify_and_get_timecode(otp)
-        except pyotp.OTPVerificationError:
-            return False
-
-        with db:
-            updated = db.execute(
-                "UPDATE totp_credentials SET last_timecode = ? "
-                "WHERE id = ? AND (last_timecode IS NULL OR last_timecode < ?)",
-                (matched_timecode, credential_id, matched_timecode),
-            )
-        return updated.rowcount == 1
-
-Grant authentication only when this function returns ``True``, after the database transaction has committed.
-If you enable ``valid_window``, persist the returned matching timecode, which may differ from the server's current timecode.
+does not match within the allowed window or its timecode has already been consumed, while ``verify()`` returns
+``False`` in both cases. Successful verification always returns an integer timecode identifying the matching
+TOTP interval; it is not the wall-clock timestamp when verification occurred. If you enable ``valid_window``,
+the consumed timecode may differ from the server's current timecode.
 
 .. warning::
 

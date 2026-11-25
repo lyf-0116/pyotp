@@ -324,7 +324,8 @@ class TOTPExampleValuesFromTheRFC(unittest.TestCase):
         totp = pyotp.TOTP("wrn3pqx5uqxqvnqrwrn3pqx5uqxqvnqr")
         with patch("pyotp.totp.time.time", return_value=1297553958):
             self.assertTrue(totp.verify("415823"))
-            self.assertTrue(totp.verify("415823"))
+            # A successful verification consumes the timecode; the same OTP cannot be replayed.
+            self.assertFalse(totp.verify("415823"))
         with patch("pyotp.totp.time.time", return_value=1297553958 + 30):
             self.assertFalse(totp.verify("415823"))
 
@@ -451,7 +452,11 @@ class TOTPTimezones(unittest.TestCase):
             for fold, timestamp in enumerate(timestamps):
                 for otp_type in (pyotp.TOTP, pyotp.contrib.Steam):
                     for interval in (30, 60) if otp_type is pyotp.TOTP else (30,):
-                        totp = otp_type("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", interval=interval)
+                        totp = otp_type(
+                            "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+                            interval=interval,
+                            replay_store=pyotp.InMemoryUsedTimecodeStore(),
+                        )
                         for delta in (-1, 0, 1):
                             with self.subTest(
                                 timezone=timezone, fold=fold, otp=otp_type, interval=interval, delta=delta
@@ -464,12 +469,16 @@ class TOTPTimezones(unittest.TestCase):
                                 for for_time in (ts, ts + 0.5, naive, aware):
                                     self.assertEqual(totp.timecode(for_time), counter)
                                     self.assertEqual(totp.at(for_time), expected)
+                                    totp.replay_store.clear()
                                     self.assertTrue(totp.verify(expected, for_time=for_time))
+                                    totp.replay_store.clear()
                                     self.assertEqual(totp.verify_and_get_timecode(expected, for_time=for_time), counter)
                                     for offset in (-1, 1):
                                         adjacent = totp.generate_otp(counter + offset)
                                         self.assertEqual(totp.at(for_time, counter_offset=offset), adjacent)
+                                        totp.replay_store.clear()
                                         self.assertTrue(totp.verify(adjacent, for_time=for_time, valid_window=1))
+                                        totp.replay_store.clear()
                                         self.assertEqual(
                                             totp.verify_and_get_timecode(adjacent, for_time=for_time, valid_window=1),
                                             counter + offset,
@@ -480,7 +489,9 @@ class TOTPTimezones(unittest.TestCase):
                                     totp.verify_and_get_timecode(other, for_time=naive, valid_window=1)
                                 with patch("pyotp.totp.time.time", return_value=ts):
                                     self.assertEqual(totp.now(), expected)
+                                    totp.replay_store.clear()
                                     self.assertTrue(totp.verify(expected))
+                                    totp.replay_store.clear()
                                     self.assertEqual(totp.verify_and_get_timecode(expected), counter)
 
     def test_naive_fractional_seconds(self):
@@ -526,7 +537,7 @@ class TOTPTimecode(unittest.TestCase):
                     self.assertEqual(totp.timecode(aware), counter)
 
     def test_numeric_timestamps(self):
-        totp = pyotp.TOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+        totp = pyotp.TOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", replay_store=pyotp.InMemoryUsedTimecodeStore())
         cases = (
             (0, 0),
             (29.999999, 0),
@@ -538,10 +549,12 @@ class TOTPTimecode(unittest.TestCase):
         )
         for timestamp, counter in cases:
             with self.subTest(timestamp=timestamp):
+                totp.replay_store.clear()
                 self.assertEqual(totp.timecode(timestamp), counter)
                 code = totp.generate_otp(counter)
                 self.assertEqual(totp.at(timestamp), code)
                 self.assertTrue(totp.verify(code, for_time=timestamp))
+                totp.replay_store.clear()
                 matched = totp.verify_and_get_timecode(code, for_time=timestamp)
                 self.assertIs(type(matched), int)
                 self.assertEqual(matched, counter)
@@ -579,7 +592,7 @@ class TOTPTimecode(unittest.TestCase):
             self.assert_time_out_of_range(for_time)
 
     def test_datetime_range_boundaries(self):
-        totp = pyotp.TOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+        totp = pyotp.TOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", replay_store=pyotp.InMemoryUsedTimecodeStore())
         cases = (
             (datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc), 0),
             (datetime.datetime(1969, 12, 31, 23, tzinfo=datetime.timezone(datetime.timedelta(hours=-1))), 0),
@@ -587,10 +600,12 @@ class TOTPTimecode(unittest.TestCase):
         )
         for for_time, counter in cases:
             with self.subTest(for_time=for_time):
+                totp.replay_store.clear()
                 code = totp.generate_otp(counter)
                 self.assertEqual(totp.timecode(for_time), counter)
                 self.assertEqual(totp.at(for_time), code)
                 self.assertTrue(totp.verify(code, for_time=for_time))
+                totp.replay_store.clear()
                 self.assertEqual(totp.verify_and_get_timecode(code, for_time=for_time), counter)
 
     def assert_time_out_of_range(self, for_time):
@@ -608,13 +623,14 @@ class TOTPTimecode(unittest.TestCase):
                         method(*args, **kwargs)
 
     def test_verification_normalizes_time_once(self):
-        totp = pyotp.TOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+        totp = pyotp.TOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", replay_store=pyotp.InMemoryUsedTimecodeStore())
         timestamp = 200.5
         counter = 6
         code = totp.generate_otp(counter + 2)
         for verify in (totp.verify, totp.verify_and_get_timecode):
             for candidate in (code, "invalid"):
                 with self.subTest(method=verify.__name__, candidate=candidate):
+                    totp.replay_store.clear()
                     with patch.object(totp, "timecode", wraps=totp.timecode) as normalize:
                         if candidate == "invalid" and verify == totp.verify_and_get_timecode:
                             with self.assertRaises(pyotp.OTPVerificationError):
@@ -742,14 +758,18 @@ class OTPInputSizeTest(unittest.TestCase):
             with self.subTest(digits=digits):
                 hotp = pyotp.HOTP("ABCDEFGHABCDEFGHABCDEFGH", digits=digits)
                 self.assertTrue(hotp.verify(hotp.at(6).translate(fullwidth), 6))
-                totp = pyotp.TOTP("ABCDEFGHABCDEFGHABCDEFGH", digits=digits)
+                totp = pyotp.TOTP(
+                    "ABCDEFGHABCDEFGHABCDEFGH", digits=digits, replay_store=pyotp.InMemoryUsedTimecodeStore()
+                )
                 code = totp.at(200).translate(fullwidth)
                 self.assertTrue(totp.verify(code, for_time=200))
+                totp.replay_store.clear()
                 self.assertEqual(totp.verify_and_get_timecode(code, for_time=200), 6)
 
-        steam = pyotp.contrib.Steam("ABCDEFGHABCDEFGHABCDEFGH")
+        steam = pyotp.contrib.Steam("ABCDEFGHABCDEFGHABCDEFGH", replay_store=pyotp.InMemoryUsedTimecodeStore())
         code = steam.at(200).translate(fullwidth)
         self.assertTrue(steam.verify(code, for_time=200))
+        steam.replay_store.clear()
         self.assertEqual(steam.verify_and_get_timecode(code, for_time=200), 6)
 
 
@@ -762,7 +782,7 @@ class CounterOffsetTest(unittest.TestCase):
 
 class ValidWindowTest(unittest.TestCase):
     def test_valid_window(self):
-        totp = pyotp.TOTP("ABCDEFGHABCDEFGHABCDEFGH")
+        totp = pyotp.TOTP("ABCDEFGHABCDEFGHABCDEFGH", replay_store=pyotp.InMemoryUsedTimecodeStore())
         self.assertTrue(totp.verify("549250", for_time=200, valid_window=1))
         self.assertTrue(totp.verify("823229", for_time=200, valid_window=1))
         self.assertTrue(totp.verify("797869", for_time=200, valid_window=1))
@@ -771,7 +791,7 @@ class ValidWindowTest(unittest.TestCase):
 
 class GetTimeCodeTest(unittest.TestCase):
     def test_timecode(self):
-        totp = pyotp.TOTP("ABCDEFGHABCDEFGHABCDEFGH")
+        totp = pyotp.TOTP("ABCDEFGHABCDEFGHABCDEFGH", replay_store=pyotp.InMemoryUsedTimecodeStore())
         self.assertEqual(totp.verify_and_get_timecode("549250", for_time=200, valid_window=1), 5)
         self.assertEqual(totp.verify_and_get_timecode("823229", for_time=200, valid_window=1), 6)
         self.assertEqual(totp.verify_and_get_timecode("797869", for_time=200, valid_window=1), 7)
@@ -804,6 +824,76 @@ class GetTimeCodeTest(unittest.TestCase):
         totp = pyotp.TOTP("ABCDEFGHABCDEFGHABCDEFGH")
         with self.assertRaisesRegex(ValueError, "valid_window cannot be negative"):
             totp.verify_and_get_timecode("823229", for_time=200, valid_window=-1)
+        with self.assertRaisesRegex(ValueError, "valid_window cannot be negative"):
+            totp.verify("823229", for_time=200, valid_window=-1)
+
+
+class ReplayProtectionTest(unittest.TestCase):
+    def test_replayed_otp_is_rejected_across_instances(self):
+        # The default store is shared process-wide and keyed per account, so
+        # replay protection holds even when each request builds its own TOTP.
+        secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+        with patch("pyotp.totp.time.time", return_value=2000):
+            first = pyotp.TOTP(secret)
+            code = first.now()
+            self.assertTrue(first.verify(code))
+            second = pyotp.TOTP(secret)
+            self.assertFalse(second.verify(code))
+            with self.assertRaises(pyotp.OTPVerificationError):
+                second.verify_and_get_timecode(code)
+        with patch("pyotp.totp.time.time", return_value=2030):
+            self.assertFalse(pyotp.TOTP(secret).verify(code))
+
+    def test_failed_verification_does_not_consume(self):
+        totp = pyotp.TOTP("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXQ")
+        with patch("pyotp.totp.time.time", return_value=2000):
+            code = totp.now()
+            wrong = "000000" if code != "000000" else "000001"
+            self.assertFalse(totp.verify(wrong))
+            self.assertTrue(totp.verify(code))
+
+    def test_window_consumes_only_matched_timecode(self):
+        totp = pyotp.TOTP("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXR")
+        previous = totp.at(2000 - 30)
+        current = totp.at(2000)
+        with patch("pyotp.totp.time.time", return_value=2000):
+            self.assertTrue(totp.verify(previous, valid_window=1))
+            self.assertFalse(totp.verify(previous, valid_window=1))
+            self.assertTrue(totp.verify(current, valid_window=1))
+
+    def test_accounts_are_isolated(self):
+        with patch("pyotp.totp.time.time", return_value=2000):
+            first = pyotp.TOTP("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXS")
+            second = pyotp.TOTP("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXT")
+            self.assertTrue(first.verify(first.now()))
+            self.assertTrue(second.verify(second.now()))
+
+    def test_protection_follows_the_injected_store(self):
+        secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXU"
+        store = pyotp.InMemoryUsedTimecodeStore()
+        with patch("pyotp.totp.time.time", return_value=2000):
+            first = pyotp.TOTP(secret, replay_store=store)
+            code = first.now()
+            self.assertTrue(first.verify(code))
+            # An instance sharing the store rejects the replay...
+            self.assertFalse(pyotp.TOTP(secret, replay_store=store).verify(code))
+            # ...while an instance with its own store does not see it.
+            self.assertTrue(pyotp.TOTP(secret, replay_store=pyotp.InMemoryUsedTimecodeStore()).verify(code))
+
+    def test_in_memory_store_consume_and_clear(self):
+        store = pyotp.InMemoryUsedTimecodeStore()
+        self.assertTrue(store.consume("account", 7))
+        self.assertFalse(store.consume("account", 7))
+        self.assertTrue(store.consume("other", 7))
+        store.clear()
+        self.assertTrue(store.consume("account", 7))
+
+    def test_steam_verification_consumes_timecode(self):
+        steam = pyotp.contrib.Steam("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXV")
+        with patch("pyotp.totp.time.time", return_value=2000):
+            code = steam.now()
+            self.assertTrue(steam.verify(code))
+            self.assertFalse(steam.verify(code))
 
 
 class DigestFunctionTest(unittest.TestCase):

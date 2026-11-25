@@ -9,6 +9,7 @@ from typing import Any
 from . import utils
 from .exceptions import OTPVerificationError
 from .otp import OTP
+from .replay import UsedTimecodeStore, shared_store
 
 _TIMESTAMP_LIMIT = 253402300800  # 10000-01-01 00:00:00 UTC, exclusive.
 
@@ -27,6 +28,7 @@ class TOTP(OTP):
         name: str | None = None,
         issuer: str | None = None,
         interval: int = 30,
+        replay_store: UsedTimecodeStore | None = None,
     ) -> None:
         """
         :param s: secret in base32 format
@@ -35,6 +37,10 @@ class TOTP(OTP):
         :param name: account name
         :param issuer: issuer
         :param interval: the time interval in seconds, greater than 0 and at most 120. Defaults to 30.
+        :param replay_store: :class:`~pyotp.replay.UsedTimecodeStore` used to reject already-consumed
+            timecodes. Defaults to a process-wide in-memory store shared by all TOTP instances.
+            Deployments spanning multiple processes must inject a shared backend for replay
+            protection to hold.
 
         See `NIST SP 800-63B-4 section 3.1.4.1
         <https://pages.nist.gov/800-63-4/sp800-63b.html>`_.
@@ -49,6 +55,12 @@ class TOTP(OTP):
             raise ValueError("interval must be positive and at most 120 seconds")
         self.interval = interval
         super().__init__(s=s, digits=digits, digest=digest, name=name, issuer=issuer)
+        self.replay_store: UsedTimecodeStore = replay_store if replay_store is not None else shared_store
+        # The replay key identifies the account (its credential); the secret is
+        # hashed so that external stores never see it in plaintext.
+        secret = self.secret if isinstance(self.secret, bytes) else str(self.secret).encode("utf-8")
+        secret_fingerprint = hashlib.sha256(secret).hexdigest()
+        self._replay_key = f"totp:{self.digest().name}:{self.interval}:{self.digits}:{secret_fingerprint}"
 
     def at(self, for_time: int | float | datetime.datetime, *, counter_offset: int = 0) -> str:
         """
@@ -87,6 +99,10 @@ class TOTP(OTP):
         """
         Verifies the OTP passed in against the current time OTP.
 
+        A successful verification consumes the matching timecode: the same OTP
+        cannot be verified again for this account. See
+        :meth:`verify_and_get_timecode` for details.
+
         Unix timestamps are measured in seconds since 1970-01-01 00:00:00 UTC.
         Prefer Unix timestamps or timezone-aware UTC datetimes. Naive
         datetimes are interpreted as local time, respecting ``fold``.
@@ -95,20 +111,13 @@ class TOTP(OTP):
         :param for_time: Unix timestamp (int or float) or datetime to check OTP at (defaults to now)
         :param valid_window: extends the validity to this many counter ticks before and after the current one
         :returns: True if verification succeeded, False otherwise
-        :raises ValueError: if for_time is before the Unix epoch or after year 9999 in UTC
+        :raises ValueError: if valid_window is negative or for_time is before the Unix epoch or after year 9999 in UTC
         """
-        if for_time is None:
-            for_time = time.time()
-
-        timecode = self.timecode(for_time)
-
-        if valid_window:
-            for i in range(-valid_window, valid_window + 1):
-                if utils.strings_equal(str(otp), str(self.generate_otp(timecode + i))):
-                    return True
+        try:
+            self.verify_and_get_timecode(otp, for_time=for_time, valid_window=valid_window)
+        except OTPVerificationError:
             return False
-
-        return utils.strings_equal(str(otp), str(self.generate_otp(timecode)))
+        return True
 
     def verify_and_get_timecode(
         self, otp: str, *, for_time: int | float | datetime.datetime | None = None, valid_window: int = 0
@@ -122,10 +131,13 @@ class TOTP(OTP):
             this method raises :class:`~pyotp.exceptions.OTPVerificationError`
             on an OTP mismatch, while :meth:`verify` returns ``False``.
 
-        This is useful when callers need to prevent TOTP reuse. An
-        application can store the timecode from the last successful
-        authentication and reject future OTPs whose matching timecode
-        is not greater than the stored one.
+        A successful verification consumes the matching timecode in the
+        account's ``replay_store``: submitting the same OTP again fails, which
+        prevents replay attacks. The library maintains this state per account;
+        by default all instances share a process-wide in-memory store, so
+        deployments spanning multiple processes must inject a shared
+        :class:`~pyotp.replay.UsedTimecodeStore` via the ``replay_store``
+        constructor argument for the protection to hold.
 
         Unix timestamps are measured in seconds since 1970-01-01 00:00:00 UTC.
         Prefer Unix timestamps or timezone-aware UTC datetimes. Naive
@@ -136,6 +148,7 @@ class TOTP(OTP):
         :param valid_window: extends the validity to this counter ticks before and after the current one
         :returns: matching timecode if verification succeeded
         :raises pyotp.exceptions.OTPVerificationError: if the OTP does not match within the valid window
+            or its timecode has already been consumed
         :raises ValueError: if valid_window is negative or for_time is before the Unix epoch or after year 9999 in UTC
         """
         if for_time is None:
@@ -145,10 +158,16 @@ class TOTP(OTP):
             raise ValueError("valid_window cannot be negative")
 
         timecode = self.timecode(for_time)
+        matched = None
         for i in range(-valid_window, valid_window + 1):
             if utils.strings_equal(str(otp), str(self.generate_otp(timecode + i))):
-                return timecode + i
-        raise OTPVerificationError("OTP verification failed")
+                matched = timecode + i
+                break
+        if matched is None:
+            raise OTPVerificationError("OTP verification failed")
+        if not self.replay_store.consume(self._replay_key, matched):
+            raise OTPVerificationError("OTP has already been used")
+        return matched
 
     def provisioning_uri(self, *, name: str | None = None, issuer_name: str | None = None, **kwargs: Any) -> str:
         """

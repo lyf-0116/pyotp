@@ -12,6 +12,7 @@ from .compat import random
 from .exceptions import OTPVerificationError, PyOTPError
 from .hotp import HOTP
 from .otp import OTP
+from .replay import InMemoryUsedTimecodeStore, UsedTimecodeStore
 from .totp import TOTP
 
 

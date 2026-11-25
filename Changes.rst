@@ -1,3 +1,12 @@
+Unreleased
+==========
+
+-  Prevent TOTP replay in the library: successful verification now consumes
+   the matching timecode in a per-account ``replay_store`` (a process-wide
+   in-memory store by default), so the same OTP cannot be verified twice.
+   ``TOTP.verify()`` now also raises ``ValueError`` for a negative
+   ``valid_window``, matching ``verify_and_get_timecode()``
+
 Changes for v2.12.1 (2026-11-18)
 ================================
 
